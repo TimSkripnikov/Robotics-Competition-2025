@@ -51,7 +51,7 @@ class CrossroadNode(Node):
 
             # Поворот на месте
             twist = Twist()
-            twist.linear.x = 0.08
+            twist.linear.x = 0.0
             twist.angular.z = 0.4
             self.cmd_pub.publish(twist)
 
@@ -60,7 +60,7 @@ class CrossroadNode(Node):
             # Таймер окончания поворота
             if self.left_turn_timer is None:
                 self.left_turn_timer = self.create_timer(
-                    1.4, self.finish_left_turn
+                    1.6, self.finish_left_turn
                 )
 
         elif msg.data == 'work':
