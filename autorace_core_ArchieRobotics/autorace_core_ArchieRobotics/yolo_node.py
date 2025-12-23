@@ -2,10 +2,13 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from sensor_msgs.msg import Image
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
+from tf_transformations import euler_from_quaternion
 import cv2
 import numpy as np
-import time
+import math
 
 
 def detect_turn_direction(
@@ -70,66 +73,155 @@ class YOLONode(Node):
         self.image_sub = self.create_subscription(
             Image, '/color/image', self.image_callback, 10
         )
+        self.odom_sub = self.create_subscription(
+            Odometry, '/odom', self.odom_callback, 10
+        )
 
         # Публикаторы
         self.label_pub = self.create_publisher(String, '/yolo/label', 10)
-        # self.finish_pub = self.create_publisher(String, '/robot_finish', 10)
         self.task3_publisher = self.create_publisher(String, '/comp/task_3', 10)
-
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)  # Новый публикатор для остановки
 
         self.bridge = CvBridge()
 
-        # Тайминги
-        self.start_time = None
-        self.direction_time = None
+        # Текущая позиция робота
+        self.current_x = 0.0
+        self.current_y = 0.0
+        
+        self.sign_check_point = [0.77049, 1.12266]  
+        self.work_check_point = [-0.36198823, 2.37605868]  
+        self.tolerance = 0.08
 
         # Состояния
         self.active = False
         self.direction_sent = False
         self.task3_sent = False
+        self.sign_check_done = False
+        self.work_check_done = False
+        self.stopped_at_sign = False  # Флаг остановки на точке знака
+
+        # Для хранения изображения для анализа
+        self.last_image = None
 
     def start_callback(self, msg):
-        self.get_logger().info("Green light detected. Timer started.")
-        self.start_time = time.time()
+        self.get_logger().info("Green light detected. YOLO node activated.")
+        self.active = True
+
+    def odom_callback(self, msg):
+        """
+        Получение текущей позиции робота из одометрии
+        """
+        if not self.active:
+            return
+            
+        # Получаем позицию
+        self.current_x = msg.pose.pose.position.x
+        self.current_y = msg.pose.pose.position.y
+        
+        # Проверяем точки
+        self.check_points()
+
+    def check_points(self):
+        """
+        Проверка достижения контрольных точек
+        """
+        # Проверяем точку знака
+        if not self.sign_check_done:
+            distance_to_sign = math.sqrt(
+                (self.current_x - self.sign_check_point[0])**2 + 
+                (self.current_y - self.sign_check_point[1])**2
+            )
+            
+            if distance_to_sign <= self.tolerance:
+                self.get_logger().info(f"Reached sign check point at ({self.current_x:.3f}, {self.current_y:.3f})")
+                self.sign_check_done = True
+                
+                # ОСТАНАВЛИВАЕМ РОБОТА
+                self.stop_robot()
+                self.stopped_at_sign = True
+                
+                # Если есть изображение, анализируем его для определения направления
+                if self.last_image is not None and not self.direction_sent:
+                    self.analyze_sign()
+
+        # Проверяем точку работ (только если уже прошли точку знака)
+        if self.sign_check_done and not self.work_check_done:
+            distance_to_work = math.sqrt(
+                (self.current_x - self.work_check_point[0])**2 + 
+                (self.current_y - self.work_check_point[1])**2
+            )
+            
+            if distance_to_work <= self.tolerance:
+                self.get_logger().info(f"Reached work check point at ({self.current_x:.3f}, {self.current_y:.3f})")
+                self.work_check_done = True
+                
+                # Отправляем сигнал для Task 3
+                if not self.task3_sent:
+                    self.send_task3_signal()
 
     def image_callback(self, msg):
-        if self.start_time is None:
+        """
+        Получение изображения с камеры
+        """
+        if not self.active:
             return
+            
+        # Сохраняем последнее изображение для анализа
+        self.last_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        
+        # Если достигли точки знака и еще не отправили направление, анализируем сразу
+        if self.sign_check_done and not self.direction_sent:
+            self.analyze_sign()
 
-        now = time.time()
+    def analyze_sign(self):
+        """
+        Анализ изображения для определения направления знака
+        """
+        if self.last_image is None:
+            self.get_logger().warn("No image available for sign analysis")
+            return
+            
+        try:
+            direction = detect_turn_direction(self.last_image)
+            
+            out = String()
+            out.data = direction
+            self.label_pub.publish(out)
+            
+            self.direction_sent = True
+            self.get_logger().info(f"Direction detected and published: {direction}")
+            
+            # Очищаем изображение, чтобы не анализировать повторно
+            self.last_image = None
+            
+        except Exception as e:
+            self.get_logger().error(f"Error analyzing sign: {e}")
 
-        # === ФАЗА 1: определение направления ===
-        if not self.direction_sent:
-            if now - self.start_time >= 19.5:
-                cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-                direction = detect_turn_direction(cv_image)
+    def send_task3_signal(self):
+        """
+        Отправка сигнала для активации Task 3
+        """
+        task3_msg = String()
+        task3_msg.data = "start_navigation"
+        self.task3_publisher.publish(task3_msg)
+        
+        self.task3_sent = True
+        self.get_logger().info("Task 3 activation signal sent")
+        
+        self.get_logger().info("YOLO node completed its work")
 
-                out = String()
-                out.data = direction
-                self.label_pub.publish(out)
-
-                self.direction_sent = True
-                self.direction_time = now
-
-                self.get_logger().info(f"Direction detected and published: {direction}")
-
-        # === ФАЗА 2: завершение робота ===
-        else:
-            # if now - self.direction_time >= 40.0:
-            #     finish_msg = String()
-            #     finish_msg.data = "ArchieRobotics"
-            #     self.finish_pub.publish(finish_msg)
-
-            #     self.get_logger().info("Finish message published. Shutting down node.")
-            #     raise SystemExit
-            if now - self.direction_time >= 40.0:
-                task3_msg = String()
-                task3_msg.data = "start_navigation"
-                self.task3_publisher.publish(task3_msg)  # Новый publisher
-                self.task3_sent = True
-                self.get_logger().info("Task 3 activation signal sent")
-                raise SystemExit
-
+    def stop_robot(self):
+        """
+        Остановка робота
+        """
+        try:
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            self.cmd_vel_pub.publish(msg)
+            self.get_logger().info("Robot stopped at sign check point")
+        except Exception as e:
+            self.get_logger().error(f"Error stopping robot: {e}")
 
 
 def main(args=None):
@@ -138,7 +230,7 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
-    except SystemExit:
+    except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
