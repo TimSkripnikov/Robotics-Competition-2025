@@ -51,7 +51,7 @@ class CrossroadNode(Node):
 
             # Поворот на месте
             twist = Twist()
-            twist.linear.x = 0.0
+            twist.linear.x = 0.08
             twist.angular.z = 0.4
             self.cmd_pub.publish(twist)
 
@@ -108,7 +108,7 @@ class CrossroadNode(Node):
         # Таймер на 1.5 секунды жёлтого режима
         if self.yellow_timer is None:
             self.yellow_timer = self.create_timer(
-                1.5, self.switch_to_both
+                5.0, self.switch_to_both
             )
 
     def switch_to_both(self):
